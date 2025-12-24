@@ -2,7 +2,7 @@
 // Convert text to PNG image
 //
 // Usage:
-// txt2png -text "JOJO" -fontfile /usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf -dpi 72 -hinting none -size 125 -whiteonblack
+// txt2png -text "JOJO" -fontfile ./LiberationMono-Regular.ttf -dpi 72 -hinting none -size 125 -whiteonblack -out out.png -slotwidth 250 -height 200
 //
 // Original code: https://github.com/chrplr/txt2png
 //
@@ -27,111 +27,138 @@ import (
 )
 
 var (
-	dpi      = flag.Float64("dpi", 72, "screen resolution in Dots Per Inch")
-	fontfile = flag.String("fontfile", "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf", "filename of the ttf font")
-	hinting  = flag.String("hinting", "none", "none | full")
-	fontSize = flag.Float64("size", 125, "font size in points")
-	wonb     = flag.Bool("whiteonblack", false, "white text on a black background")
-	text     = flag.String("text", "JOJO", "text to render")
+	dpi            = flag.Float64("dpi", 72, "screen resolution in Dots Per Inch")
+	fontfile       = flag.String("fontfile", "./LiberationMono-Regular.ttf", "filename of the ttf font")
+	hinting        = flag.String("hinting", "none", "none | full")
+	fontSize       = flag.Float64("size", 125, "font size in points")
+	wonb           = flag.Bool("whiteonblack", false, "white text on a black background")
+	text           = flag.String("text", "TEST", "text to render")
+	outFile        = flag.String("out", "out.png", "output PNG filename")
+	slotWidth      = flag.Int("slotwidth", 120, "width of each character slot in pixels")
+	imageHeight    = flag.Int("height", 120, "height of the image in pixels")
+	showGuidelines = flag.Bool("guidelines", false, "draw vertical guidelines between character slots")
+	verbose        = flag.Bool("verbose", false, "print informational messages to the console")
 )
 
 func main() {
 	flag.Parse()
 
-	fmt.Printf("Loading fontfile %q\n", *fontfile)
-	fontBytes, err := os.ReadFile(*fontfile)
+	f := loadFont(*fontfile, *verbose)
+
+	fg, bg, rulerColor := getColors(*wonb)
+
+	rgba := createImage(len(*text), *slotWidth, *imageHeight, bg, rulerColor, *showGuidelines)
+
+	c := getFreeTypeContext(f, *dpi, *fontSize, rgba, fg, *hinting)
+
+	renderText(c, f, *text, *slotWidth, *imageHeight, *dpi, *fontSize, *verbose)
+
+	saveImage(*outFile, rgba)
+
+	if *verbose {
+		fmt.Printf("Successfully wrote %s\n", *outFile)
+	}
+}
+
+func loadFont(path string, verb bool) *truetype.Font {
+	if verb {
+		fmt.Printf("Loading fontfile %q\n", path)
+	}
+	fontBytes, err := os.ReadFile(path)
 	if err != nil {
 		log.Fatalf("Error reading font file: %v", err)
 	}
-
 	f, err := truetype.Parse(fontBytes)
 	if err != nil {
 		log.Fatalf("Error parsing font: %v", err)
 	}
+	return f
+}
 
-	// Calculate image dimensions based on text length
-	// Each character is allocated a 250px wide slot
-	const slotWidth = 250
-	const imageHeight = 200
-	width := len(*text) * slotWidth
-	if width == 0 {
-		width = slotWidth
-	}
-	rgba := image.NewRGBA(image.Rect(0, 0, width, imageHeight))
-
-	// Define colors based on the 'wonb' flag
-	fg, bg := image.Image(image.Black), image.Image(image.White)
-	rulerColor := color.RGBA{0xdd, 0xdd, 0xdd, 0xff}
-	if *wonb {
+func getColors(whiteOnBlack bool) (fg, bg image.Image, ruler color.Color) {
+	fg, bg = image.Image(image.Black), image.Image(image.White)
+	ruler = color.RGBA{0xdd, 0xdd, 0xdd, 0xff}
+	if whiteOnBlack {
 		fg, bg = image.White, image.Black
-		rulerColor = color.RGBA{0x44, 0x44, 0x44, 0xff}
+		ruler = color.RGBA{0x44, 0x44, 0x44, 0xff}
 	}
+	return
+}
 
-	// Fill background
+func createImage(textLen, slotW, imgH int, bg image.Image, rulerColor color.Color, showGuidelines bool) *image.RGBA {
+	width := textLen * slotW
+	if width == 0 {
+		width = slotW
+	}
+	rgba := image.NewRGBA(image.Rect(0, 0, width, imgH))
 	draw.Draw(rgba, rgba.Bounds(), bg, image.Point{}, draw.Src)
 
-	// Draw vertical guidelines at each slot boundary
-	for i := 0; i < len(*text); i++ {
-		x := i * slotWidth
-		for y := 0; y < imageHeight; y++ {
-			rgba.Set(x, y, rulerColor)
+	// Vertical guidelines
+	if showGuidelines {
+		for i := 0; i < textLen; i++ {
+			x := i * slotW
+			for y := 0; y < imgH; y++ {
+				rgba.Set(x, y, rulerColor)
+			}
 		}
 	}
+	return rgba
+}
 
-	// Initialize Freetype context
+func getFreeTypeContext(f *truetype.Font, dpi, size float64, dst *image.RGBA, src image.Image, hintingStr string) *freetype.Context {
 	c := freetype.NewContext()
-	c.SetDPI(*dpi)
+	c.SetDPI(dpi)
 	c.SetFont(f)
-	c.SetFontSize(*fontSize)
-	c.SetClip(rgba.Bounds())
-	c.SetDst(rgba)
-	c.SetSrc(fg)
+	c.SetFontSize(size)
+	c.SetClip(dst.Bounds())
+	c.SetDst(dst)
+	c.SetSrc(src)
 
-	switch *hinting {
+	switch hintingStr {
 	case "full":
 		c.SetHinting(font.HintingFull)
 	default:
 		c.SetHinting(font.HintingNone)
 	}
+	return c
+}
 
-	// Create a font face to measure glyph advance widths
+func renderText(c *freetype.Context, f *truetype.Font, text string, slotW, imgH int, dpi, size float64, verb bool) {
 	opts := truetype.Options{
-		Size: *fontSize,
-		DPI:  *dpi,
+		Size: size,
+		DPI:  dpi,
 	}
 	face := truetype.NewFace(f, &opts)
 
-	// Render each character centered in its slot
-	for i, r := range *text {
+	for i, r := range text {
 		advance, ok := face.GlyphAdvance(r)
 		if !ok {
 			log.Printf("Warning: failed to get glyph advance for %q", r)
 			continue
 		}
 
-		// Convert fixed-point advance to pixels
 		glyphWidthPx := int(float64(advance) / 64)
-		fmt.Printf("Char: %q, Width: %dpx\n", r, glyphWidthPx)
+		if verb {
+			fmt.Printf("Char: %q, Width: %dpx\n", r, glyphWidthPx)
+		}
 
-		// Calculate horizontal position to center glyph in slot
-		xPos := i*slotWidth + (slotWidth/2 - glyphWidthPx/2)
-		// 128 is the hardcoded baseline from the original code
-		pt := freetype.Pt(xPos, 128)
+		xPos := i*slotW + (slotW/2 - glyphWidthPx/2)
+		pt := freetype.Pt(xPos, imgH*2/3)
 
 		if _, err := c.DrawString(string(r), pt); err != nil {
 			log.Printf("Error drawing %q: %v", r, err)
 		}
 	}
+}
 
-	// Save the resulting image to out.png
-	const outFileName = "out.png"
-	outFile, err := os.Create(outFileName)
+func saveImage(path string, rgba *image.RGBA) {
+	out, err := os.Create(path)
 	if err != nil {
 		log.Fatalf("Error creating output file: %v", err)
 	}
-	defer outFile.Close()
+	defer out.Close()
 
-	bWriter := bufio.NewWriter(outFile)
+	bWriter := bufio.NewWriter(out)
 	if err := png.Encode(bWriter, rgba); err != nil {
 		log.Fatalf("Error encoding PNG: %v", err)
 	}
@@ -139,6 +166,4 @@ func main() {
 	if err := bWriter.Flush(); err != nil {
 		log.Fatalf("Error flushing buffer: %v", err)
 	}
-
-	fmt.Printf("Successfully wrote %s\n", outFileName)
 }
